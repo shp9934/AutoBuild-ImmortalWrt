@@ -80,9 +80,21 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
   
+    - name: Install tmate
+      if: env.SSH_ACTIONS == 'true'
+      timeout-minutes: 5
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y tmate openssh-client
+        command -v tmate
+        tmate -V
+
     - name: SSH connection to Actions
       if: env.SSH_ACTIONS == 'true'
       uses: mxschmitt/action-tmate@v3
+      timeout-minutes: 30
+      with:
+        install-dependencies: false
       
     - name: Download package
       id: package
