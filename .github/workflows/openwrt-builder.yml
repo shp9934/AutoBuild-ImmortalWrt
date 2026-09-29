@@ -91,10 +91,41 @@ jobs:
 
     - name: SSH connection to Actions
       if: env.SSH_ACTIONS == 'true'
-      uses: mxschmitt/action-tmate@v3
       timeout-minutes: 30
-      with:
-        install-dependencies: false
+      shell: bash
+      run: |
+        SOCK=/tmp/openwrt-tmate.sock
+        trap 'tmate -S "$SOCK" kill-server 2>/dev/null || true' EXIT
+
+        echo "=== 启动 tmate ==="
+        tmate -S "$SOCK" new-session -d -s openwrt \
+          -c /workdir/openwrt "bash --noprofile --norc"
+
+        echo "=== 等待远程连接，最多 90 秒 ==="
+        if ! timeout 90s tmate -S "$SOCK" wait tmate-ready; then
+          echo "=== tmate 连接诊断 ==="
+          tmate -S "$SOCK" show-messages || true
+          echo "=== DNS 解析 ==="
+          timeout 10s getent ahosts ssh.tmate.io || true
+          echo "=== TCP 22 端口检测 ==="
+          timeout 10s bash -c 'exec 3<>/dev/tcp/ssh.tmate.io/22' \
+            && echo "TCP 22 可达" || echo "TCP 22 连接失败"
+          exit 1
+        fi
+
+        echo "=== SSH 连接命令 ==="
+        tmate -S "$SOCK" display -p '#{tmate_ssh}'
+        echo "=== 网页终端地址 ==="
+        tmate -S "$SOCK" display -p '#{tmate_web}'
+        echo "配置保存后执行：touch /tmp/openwrt-config-done"
+
+        while [ ! -f /tmp/openwrt-config-done ]; do
+          if ! tmate -S "$SOCK" has-session 2>/dev/null; then
+            echo "会话提前关闭，停止编译"
+            exit 1
+          fi
+          sleep 5
+        done
       
     - name: Download package
       id: package
