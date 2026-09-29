@@ -24,11 +24,15 @@ env:
   CONFIG_FILE: .config
   DIY_P1_SH: diy-part1.sh
   DIY_P2_SH: diy-part2.sh
-  SSH_ACTIONS: true
+  SSH_ACTIONS: 'false'
   UPLOAD_BIN_DIR: false
   UPLOAD_FIRMWARE: true
   UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
+
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   build:
@@ -80,58 +84,24 @@ jobs:
         cd openwrt
         $GITHUB_WORKSPACE/$DIY_P2_SH
   
-    - name: Install tmate
-      if: env.SSH_ACTIONS == 'true'
-      timeout-minutes: 5
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y tmate openssh-client
-        command -v tmate
-        tmate -V
-
-    - name: SSH connection to Actions
-      if: env.SSH_ACTIONS == 'true'
-      timeout-minutes: 30
-      shell: bash
-      run: |
-        SOCK=/tmp/openwrt-tmate.sock
-        trap 'tmate -S "$SOCK" kill-server 2>/dev/null || true' EXIT
-
-        echo "=== 启动 tmate ==="
-        tmate -S "$SOCK" new-session -d -s openwrt \
-          -c /workdir/openwrt "bash --noprofile --norc"
-
-        echo "=== 等待远程连接，最多 90 秒 ==="
-        if ! timeout 90s tmate -S "$SOCK" wait tmate-ready; then
-          echo "=== tmate 连接诊断 ==="
-          tmate -S "$SOCK" show-messages || true
-          echo "=== DNS 解析 ==="
-          timeout 10s getent ahosts ssh.tmate.io || true
-          echo "=== TCP 22 端口检测 ==="
-          timeout 10s bash -c 'exec 3<>/dev/tcp/ssh.tmate.io/22' \
-            && echo "TCP 22 可达" || echo "TCP 22 连接失败"
-          exit 1
-        fi
-
-        echo "=== SSH 连接命令 ==="
-        tmate -S "$SOCK" display -p '#{tmate_ssh}'
-        echo "=== 网页终端地址 ==="
-        tmate -S "$SOCK" display -p '#{tmate_web}'
-        echo "配置保存后执行：touch /tmp/openwrt-config-done"
-
-        while [ ! -f /tmp/openwrt-config-done ]; do
-          if ! tmate -S "$SOCK" has-session 2>/dev/null; then
-            echo "会话提前关闭，停止编译"
-            exit 1
-          fi
-          sleep 5
-        done
-      
     - name: Download package
       id: package
       run: |
         cd openwrt
+        cp .config /tmp/arthur-requested.config
         make defconfig
+        missing=0
+        while IFS= read -r option; do
+          case "$option" in
+            CONFIG_*=y)
+              if ! grep -Fqx "$option" .config; then
+                echo "::error::Required option missing after defconfig: $option"
+                missing=1
+              fi
+              ;;
+          esac
+        done < /tmp/arthur-requested.config
+        [ "$missing" -eq 0 ]
         make download -j8
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -147,6 +117,15 @@ jobs:
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
 
+    - name: Upload expanded build configuration
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: arthur-build-config
+        path: openwrt/.config
+        include-hidden-files: true
+        if-no-files-found: ignore
+
     - name: Check space usage
       if: (!cancelled())
       run: df -hT
@@ -160,7 +139,7 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
@@ -176,11 +155,10 @@ jobs:
 
     - name: Generate release tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.organize.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        [ ${UPLOAD_GOFILE} = true && ${{ steps.gofile.outputs.url }} ] && echo "🔗 [GoFile](${{ steps.gofile.outputs.url }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
@@ -201,7 +179,7 @@ jobs:
 
     - name: Remove old Releases
       uses: dev-drprasad/delete-older-releases@master
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.tag.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
       with:
         keep_latest: 3
         delete_tags: true
